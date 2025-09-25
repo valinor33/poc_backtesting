@@ -1,317 +1,222 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { createChart, CrosshairMode } from "lightweight-charts";
 
-/**
- * Canvas tipo TradingView con:
- * - Velas japonesas
- * - EMA (línea)
- * - FVG zones (bandas horizontales extendidas a la derecha)
- * - Rectángulos de operaciones (ancho = 3 velas; verde si pnl>0, rojo si pnl<=0)
- * - Replay (play/pause, speed, reset)
- * - Zoom con rueda y Pan con drag
- *
- * Props:
- *  - candles: [{time,open,high,low,close}]
- *  - ema: [{time,value}]
- *  - fvgZones: [{dir, low, high, index}]  // index es el índice de la vela del FVG
- *  - trades: [{time, dir, entry, sl, tp, lot, opened, exit, exitTime, pnl}]
- */
 export default function ChartReplay({
   candles = [],
   ema = [],
   fvgZones = [],
   trades = [],
 }) {
-  const canvasRef = useRef(null);
-  const [playing, setPlaying] = useState(false);
-  const [speedMs, setSpeedMs] = useState(50);
+  const containerRef = useRef(null);
+  const chartRef = useRef(null);
+  const mainRef = useRef(null);
+  const emaRef = useRef(null);
+
   const [idx, setIdx] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState(50);
 
-  // zoom/pan
-  const [barW, setBarW] = useState(8); // ancho de vela en px
-  const [offset, setOffset] = useState(0); // desplazamiento de barras hacia la izquierda (pan)
-  const drag = useRef({ active: false, x: 0, offsetStart: 0 });
-
-  // Mapa time->index para ubicar trades/fvg
-  const timeToIndex = useMemo(() => {
-    const m = new Map();
-    candles.forEach((c, i) => m.set(c.time, i));
-    return m;
-  }, [candles]);
-
-  // Normaliza EMA a puntos visibles (por idx)
-  const emaIdx = useMemo(() => {
-    if (!ema?.length || !candles?.length) return [];
-    const map = new Map(ema.map((e) => [e.time, e.value]));
-    return candles.map((c) => ({
-      time: c.time,
-      value: map.get(c.time) ?? null,
-    }));
-  }, [ema, candles]);
-
-  // Reproducción
+  // init chart
   useEffect(() => {
-    if (!playing) return;
-    const t = setInterval(() => {
-      setIdx((i) => Math.min(i + 1, Math.max(0, candles.length - 1)));
-    }, speedMs);
-    return () => clearInterval(t);
-  }, [playing, speedMs, candles.length]);
+    const host = containerRef.current;
+    if (!host) return;
 
-  // Redibujar
-  useEffect(() => {
-    draw();
-  }, [idx, candles, emaIdx, fvgZones, trades, barW, offset]);
+    const chart = createChart(host, {
+      layout: { background: { color: "#0f172a" }, textColor: "#cbd5e1" },
+      grid: {
+        vertLines: { color: "#1e293b" },
+        horzLines: { color: "#1e293b" },
+      },
+      rightPriceScale: { borderColor: "#334155" },
+      timeScale: { borderColor: "#334155", rightOffset: 6 },
+      crosshair: { mode: CrosshairMode.Normal },
+    });
 
-  const reset = () => setIdx(0);
+    const main = chart.addCandlestickSeries();
+    const emaS = chart.addLineSeries({ color: "#facc15", lineWidth: 2 });
 
-  // Eventos zoom/pan
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    chartRef.current = chart;
+    mainRef.current = main;
+    emaRef.current = emaS;
 
-    const onWheel = (e) => {
-      e.preventDefault();
-      const delta = Math.sign(e.deltaY);
-      setBarW((w) => Math.max(3, Math.min(30, w - delta)));
-    };
-
-    const onDown = (e) => {
-      drag.current = { active: true, x: e.clientX, offsetStart: offset };
-    };
-    const onMove = (e) => {
-      if (!drag.current.active) return;
-      const dx = e.clientX - drag.current.x;
-      const bars = Math.round(dx / barW);
-      setOffset(drag.current.offsetStart - bars);
-    };
-    const onUp = () => {
-      drag.current.active = false;
-    };
-
-    canvas.addEventListener("wheel", onWheel, { passive: false });
-    canvas.addEventListener("mousedown", onDown);
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    const ro = new ResizeObserver(() => {
+      const r = host.getBoundingClientRect();
+      chart.applyOptions({ width: r.width, height: Math.max(360, r.height) });
+    });
+    ro.observe(host);
+    const r0 = host.getBoundingClientRect();
+    chart.applyOptions({ width: r0.width, height: Math.max(360, r0.height) });
 
     return () => {
-      canvas.removeEventListener("wheel", onWheel);
-      canvas.removeEventListener("mousedown", onDown);
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      ro.disconnect();
+      chart.remove();
+      chartRef.current = null;
+      mainRef.current = null;
+      emaRef.current = null;
     };
-  }, [barW, offset]);
+  }, []);
 
-  function draw() {
-    const canvas = canvasRef.current;
-    if (!canvas || !candles?.length) return;
-    const ctx = canvas.getContext("2d");
-    const W = (canvas.width = canvas.clientWidth);
-    const H = (canvas.height = canvas.clientHeight);
-
-    // Ventana visible (por zoom/pan)
-    const barsFit = Math.max(10, Math.floor(W / barW) - 2);
-    const right = Math.max(idx - offset, 0); // barra de la derecha
-    const left = Math.max(0, right - barsFit);
-    const slice = candles.slice(left, right + 1);
-    if (!slice.length) {
-      ctx.clearRect(0, 0, W, H);
-      return;
-    }
-
-    // escala Y
-    let min = Infinity,
-      max = -Infinity;
-    slice.forEach((c) => {
-      min = Math.min(min, c.low);
-      max = Math.max(max, c.high);
-    });
-    if (!isFinite(min) || !isFinite(max) || min === max) {
-      min -= 1;
-      max += 1;
-    }
-    const pad = (max - min) * 0.1;
-    min -= pad;
-    max += pad;
-
-    const y = (p) => H - ((p - min) / (max - min)) * H;
-    const x = (i) => (i - left) * barW + 0.5;
-
-    // fondo
-    ctx.fillStyle = "#0f1624";
-    ctx.fillRect(0, 0, W, H);
-
-    // grid horizontal
-    ctx.strokeStyle = "rgba(255,255,255,0.06)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let g = 1; g < 6; g++) {
-      const gy = (H / 6) * g;
-      ctx.moveTo(0, gy);
-      ctx.lineTo(W, gy);
-    }
-    ctx.stroke();
-
-    // FVG zones (hasta borde derecho)
-    for (const z of fvgZones) {
-      const zIdx = z.index ?? timeToIndex.get(z.time);
-      if (zIdx == null) continue;
-      if (zIdx > right) continue; // aún no aparece
-      const x0 = Math.max(x(zIdx), 0);
-      const w = W - x0;
-      ctx.fillStyle =
-        z.dir === "bull" ? "rgba(0,200,120,0.12)" : "rgba(255,80,80,0.12)";
-      ctx.fillRect(x0, y(z.high), w, Math.max(2, y(z.low) - y(z.high)));
-      // bordes
-      ctx.strokeStyle =
-        z.dir === "bull" ? "rgba(0,200,120,0.4)" : "rgba(255,80,80,0.4)";
-      ctx.strokeRect(x0, y(z.high), w, Math.max(2, y(z.low) - y(z.high)));
-    }
-
-    // velas
-    for (let i = left; i <= right; i++) {
-      const c = candles[i];
-      const xx = x(i);
-      // mecha
-      ctx.strokeStyle = "rgba(255,255,255,0.7)";
-      ctx.beginPath();
-      ctx.moveTo(xx, y(c.high));
-      ctx.lineTo(xx, y(c.low));
-      ctx.stroke();
-      // cuerpo
-      const up = c.close >= c.open;
-      ctx.fillStyle = up ? "rgba(0, 200, 120, 0.9)" : "rgba(255, 80, 80, 0.9)";
-      const bodyTop = y(Math.max(c.open, c.close));
-      const bodyH = Math.max(1, Math.abs(y(c.close) - y(c.open)));
-      ctx.fillRect(xx - barW * 0.4, bodyTop, barW * 0.8, bodyH);
-    }
-
-    // EMA
-    ctx.strokeStyle = "rgba(255, 210, 0, 0.9)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    let started = false;
-    for (let i = left; i <= right; i++) {
-      const v = emaIdx[i]?.value;
-      if (v == null) continue;
-      const xx = x(i);
-      const yy = y(v);
-      if (!started) {
-        ctx.moveTo(xx, yy);
-        started = true;
-      } else ctx.lineTo(xx, yy);
-    }
-    ctx.stroke();
-
-    // Operaciones (dibujar las que hayan ocurrido hasta 'right')
-    const tradesToDraw = trades.filter(
-      (t) => (timeToIndex.get(t.time) ?? 0) <= right
+  // feed series
+  useEffect(() => {
+    if (!mainRef.current || candles.length === 0) return;
+    mainRef.current.setData(
+      candles.map((c) => ({
+        time: Math.floor(c.time / 1000),
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      }))
     );
-    for (const t of tradesToDraw) {
-      const iOpen = timeToIndex.get(t.time);
-      if (iOpen == null || iOpen < left || iOpen > right) continue;
-
-      const widthBars = 3;
-      const xx = x(iOpen) - barW * 0.5;
-      const ww = barW * widthBars;
-
-      // Determinar color/altura según resultado
-      let isProfit = null;
-      let top, bottom;
-
-      if (t.opened === false && typeof t.pnl === "number") {
-        isProfit = t.pnl > 0;
-        if (t.dir === "long") {
-          top = y(Math.max(t.entry, isProfit ? t.exit ?? t.tp : t.sl));
-          bottom = y(Math.min(t.entry, isProfit ? t.exit ?? t.tp : t.sl));
-        } else {
-          // en short el beneficio es hacia abajo
-          top = y(Math.max(t.entry, isProfit ? t.sl : t.exit ?? t.tp));
-          bottom = y(Math.min(t.entry, isProfit ? t.sl : t.exit ?? t.tp));
-        }
-      } else {
-        // abierta: dibujar riesgo (entry <-> sl) en rojo claro
-        top = y(Math.max(t.entry, t.sl));
-        bottom = y(Math.min(t.entry, t.sl));
-        isProfit = null;
-      }
-
-      const hh = Math.max(2, bottom - top);
-      // fill
-      ctx.fillStyle =
-        isProfit === null
-          ? "rgba(255,255,255,0.08)"
-          : isProfit
-          ? "rgba(0,200,120,0.18)"
-          : "rgba(255,80,80,0.18)";
-      ctx.fillRect(xx, top, ww, hh);
-      // borde
-      ctx.strokeStyle =
-        isProfit === null
-          ? "rgba(255,255,255,0.25)"
-          : isProfit
-          ? "rgba(0,200,120,0.8)"
-          : "rgba(255,80,80,0.8)";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(xx, top, ww, hh);
-
-      // línea de entrada
-      ctx.strokeStyle = "rgba(180,180,255,0.7)";
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.moveTo(xx, y(t.entry));
-      ctx.lineTo(xx + ww, y(t.entry));
-      ctx.stroke();
-      ctx.setLineDash([]);
+    if (emaRef.current) {
+      emaRef.current.setData(
+        (ema || []).map((e) => ({
+          time: Math.floor(e.time / 1000),
+          value: e.value,
+        }))
+      );
     }
+    setIdx(Math.max(0, candles.length - 1));
+  }, [candles, ema]);
 
-    // Cursor de reproducción
-    ctx.strokeStyle = "rgba(255,255,255,0.25)";
-    ctx.beginPath();
-    ctx.moveTo(x(right), 0);
-    ctx.lineTo(x(right), H);
-    ctx.stroke();
+  // overlay canvas
+  useEffect(() => {
+    if (!chartRef.current || !mainRef.current || !containerRef.current) return;
 
-    // hud
-    ctx.fillStyle = "rgba(255,255,255,0.85)";
-    ctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
-    ctx.fillText(`idx: ${idx} / ${candles.length - 1}`, 10, 18);
-  }
+    const host = containerRef.current;
+    const chart = chartRef.current;
+    const series = mainRef.current;
+
+    const overlay = document.createElement("canvas");
+    overlay.style.position = "absolute";
+    overlay.style.left = "0";
+    overlay.style.top = "0";
+    overlay.style.pointerEvents = "none";
+    overlay.style.zIndex = "5";
+    host.appendChild(overlay);
+
+    const ctx = overlay.getContext("2d");
+    const dpr = window.devicePixelRatio || 1;
+    const ts = chart.timeScale();
+
+    const resize = () => {
+      const { width, height } = host.getBoundingClientRect();
+      overlay.width = Math.max(1, Math.floor(width * dpr));
+      overlay.height = Math.max(1, Math.floor(height * dpr));
+      overlay.style.width = width + "px";
+      overlay.style.height = height + "px";
+      draw();
+    };
+
+    const draw = () => {
+      if (!candles.length) return;
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+      ctx.save();
+      ctx.scale(dpr, dpr);
+
+      const tLimit = candles[idx]?.time ?? 0;
+
+      // FVG
+      (fvgZones || []).forEach((z) => {
+        if (!z?.indexTime || z.indexTime > tLimit) return;
+        const x0 = ts.timeToCoordinate(Math.floor(z.indexTime / 1000));
+        const yH = series.priceToCoordinate(z.high);
+        const yL = series.priceToCoordinate(z.low);
+        if (x0 == null || yH == null || yL == null) return;
+
+        const x1 = overlay.width / dpr;
+        const top = Math.min(yH, yL);
+        const h = Math.abs(yH - yL);
+
+        ctx.fillStyle = "rgba(59,130,246,0.12)";
+        ctx.strokeStyle = "rgba(59,130,246,0.25)";
+        ctx.fillRect(x0, top, x1 - x0, h);
+        ctx.strokeRect(x0, top, x1 - x0, h);
+      });
+
+      // Trades (3 velas de ancho)
+      (trades || []).forEach((tr) => {
+        if (!tr?.time || tr.time > tLimit) return;
+        const i = candles.findIndex((c) => c.time === tr.time);
+        if (i < 0) return;
+
+        const c0 = candles[i];
+        const c3 = candles[Math.min(candles.length - 1, i + 3)];
+        const x0 = ts.timeToCoordinate(Math.floor(c0.time / 1000));
+        const x3 = ts.timeToCoordinate(Math.floor(c3.time / 1000));
+        const ySL = series.priceToCoordinate(tr.sl);
+        const yTP = series.priceToCoordinate(tr.tp);
+        if (x0 == null || x3 == null || ySL == null || yTP == null) return;
+
+        const left = Math.min(x0, x3);
+        const width = Math.abs(x3 - x0);
+        const top = Math.min(ySL, yTP);
+        const height = Math.abs(ySL - yTP);
+
+        const win =
+          (typeof tr.pnl === "number" && tr.pnl > 0) ||
+          (tr.exit != null && tr.tp != null && tr.exit === tr.tp);
+
+        ctx.fillStyle = win ? "rgba(34,197,94,0.22)" : "rgba(239,68,68,0.22)";
+        ctx.strokeStyle = win ? "rgba(34,197,94,0.6)" : "rgba(239,68,68,0.6)";
+        ctx.fillRect(left, top, width, height);
+        ctx.strokeRect(left, top, width, height);
+      });
+
+      ctx.restore();
+    };
+
+    const onRange = () => draw();
+    const onSize = () => resize();
+
+    ts.subscribeVisibleTimeRangeChange(onRange);
+    ts.subscribeVisibleLogicalRangeChange(onRange);
+    const ro = new ResizeObserver(onSize);
+    ro.observe(host);
+
+    resize();
+    const tick = setInterval(draw, 100);
+
+    return () => {
+      clearInterval(tick);
+      ro.disconnect();
+      ts.unsubscribeVisibleTimeRangeChange(onRange);
+      ts.unsubscribeVisibleLogicalRangeChange(onRange);
+      overlay.remove();
+    };
+  }, [candles, fvgZones, trades, idx]);
+
+  // playback
+  useEffect(() => {
+    if (!playing || candles.length === 0) return;
+    const h = setInterval(
+      () => setIdx((i) => Math.min(candles.length - 1, i + 1)),
+      Math.max(5, speed)
+    );
+    return () => clearInterval(h);
+  }, [playing, speed, candles.length]);
 
   return (
-    <div className="card" style={{ marginTop: 12 }}>
-      <div className="row" style={{ gap: 10, alignItems: "center" }}>
+    <div className="card">
+      <div className="row" style={{ gap: 8, marginBottom: 8 }}>
         <button onClick={() => setPlaying((p) => !p)}>
           {playing ? "Pausa" : "Reproducir"}
         </button>
-        <button onClick={() => setSpeedMs((s) => Math.min(300, s + 25))}>
+        <button onClick={() => setSpeed((s) => Math.min(500, s + 25))}>
           - velocidad
         </button>
-        <button onClick={() => setSpeedMs((s) => Math.max(5, s - 25))}>
+        <button onClick={() => setSpeed((s) => Math.max(5, s - 25))}>
           + velocidad
         </button>
-        <button onClick={reset}>Reset</button>
-        <div style={{ opacity: 0.8 }}>
+        <button onClick={() => setIdx(0)}>Reset</button>
+        <div>
           idx: {idx} / {Math.max(0, candles.length - 1)}
         </div>
       </div>
-
       <div
-        style={{
-          position: "relative",
-          width: "100%",
-          height: 500,
-          marginTop: 8,
-          borderRadius: 10,
-          overflow: "hidden",
-          background: "#0f1624",
-          boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.06)",
-        }}
-      >
-        <canvas
-          ref={canvasRef}
-          style={{ width: "100%", height: "100%", display: "block" }}
-        />
-      </div>
+        ref={containerRef}
+        style={{ position: "relative", width: "100%", height: 520 }}
+      />
     </div>
   );
 }

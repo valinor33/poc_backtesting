@@ -1,8 +1,3 @@
-/**
- * Single-TF Backtest (simple): EMA21 + FVG + CHOCH | RR configurable
- * Extra: maxOpenPositions para limitar posiciones simultáneas.
- */
-
 import { ema, slopeUp, slopeDown, equityStats } from "../utils/math.js";
 
 export async function runBacktestSingleTF(params, cb = {}) {
@@ -25,7 +20,7 @@ export async function runBacktestSingleTF(params, cb = {}) {
     riskPercent: Number(params.riskPercent ?? 1),
     RR: Number(params.RR ?? 2.5),
     maxTradesPerDay: Number(params.maxTradesPerDay ?? 3),
-    maxOpenPositions: Number(params.maxOpenPositions ?? 1), // <— NUEVO
+    maxOpenPositions: Number(params.maxOpenPositions ?? 1),
     maxBarsInTrade: Number(params.maxBarsInTrade ?? 20),
     fractalLeftRight: Number(params.fractalLeftRight ?? 2),
     fvgScanBars: Number(params.fvgScanBars ?? 200),
@@ -40,14 +35,14 @@ export async function runBacktestSingleTF(params, cb = {}) {
   const onEquity = cb.onEquity || (() => {});
   const onTrade = cb.onTrade || (() => {});
   const onStats = cb.onStats || (() => {});
+  const onFVG = cb.onFVG || (() => {});
 
   validateCandles(p.candles);
   const N = p.candles.length;
   if (N < 60)
     throw new Error("Se necesitan ≥ 60 velas para calcular EMA y swings");
-
   onStage(
-    `1TF ${p.timeframe} | velas: ${N} | RR=${p.RR} | risk=${p.riskPercent}% | max/day=${p.maxTradesPerDay} | maxOpen=${p.maxOpenPositions}`
+    `1TF ${p.timeframe} | velas: ${N} | RR=${p.RR} | risk=${p.riskPercent}% | max/day=${p.maxTradesPerDay}`
   );
 
   const closes = p.candles.map((c) => c.close);
@@ -58,7 +53,6 @@ export async function runBacktestSingleTF(params, cb = {}) {
   const trades = [];
   const openPositions = [];
   const tradesPerDay = new Map();
-
   onEquity({ t: p.candles[0].time, equity });
 
   const chunk = Math.max(10, Math.floor(N / 100));
@@ -67,7 +61,7 @@ export async function runBacktestSingleTF(params, cb = {}) {
     const bar = p.candles[i];
     const curDay = toDateKey(bar.time);
 
-    // 1) Cierres por SL/TP
+    // cerrar SL/TP
     for (let k = openPositions.length - 1; k >= 0; k--) {
       const pos = openPositions[k];
       const res = checkExitSLTP(pos, bar, p.point);
@@ -80,8 +74,7 @@ export async function runBacktestSingleTF(params, cb = {}) {
         openPositions.splice(k, 1);
       }
     }
-
-    // 2) Salida por tiempo
+    // por tiempo
     for (let k = openPositions.length - 1; k >= 0; k--) {
       const pos = openPositions[k];
       if (i - pos.openIndex >= p.maxBarsInTrade) {
@@ -105,7 +98,7 @@ export async function runBacktestSingleTF(params, cb = {}) {
       }
     }
 
-    // 3) Flip EMA
+    // flip EMA
     const emaVal = ema21[i];
     const emaWin = ema21.slice(Math.max(0, i - 3), i + 1);
     const biasLong =
@@ -139,46 +132,29 @@ export async function runBacktestSingleTF(params, cb = {}) {
       }
     }
 
-    // 4) Límite por día
     const countToday = tradesPerDay.get(curDay) || 0;
     if (countToday >= p.maxTradesPerDay) {
       equityCurve.push({ t: bar.time, equity });
-      if (i % chunk === 0) {
-        onProgress({ ratio: i / N, step: i });
-        onStats(statsNow(equityCurve, trades));
-      }
       continue;
     }
-
-    // 5) Límite de posiciones abiertas simultáneas
     if (openPositions.length >= p.maxOpenPositions) {
       equityCurve.push({ t: bar.time, equity });
-      if (i % chunk === 0) {
-        onProgress({ ratio: i / N, step: i });
-        onStats(statsNow(equityCurve, trades));
-      }
       continue;
     }
 
-    // 6) Señal
     if (!biasLong && !biasShort) {
       equityCurve.push({ t: bar.time, equity });
-      if (i % chunk === 0) {
-        onProgress({ ratio: i / N, step: i });
-        onStats(statsNow(equityCurve, trades));
-      }
       continue;
     }
 
-    // 7) FVG
     const desired = biasLong ? "bull" : "bear";
     const fvg = findLastFVG(p.candles, i, desired, p.fvgScanBars);
     if (!fvg) {
       equityCurve.push({ t: bar.time, equity });
       continue;
     }
+    onFVG({ ...fvg, indexTime: p.candles[fvg.index].time });
 
-    // 8) Swings + CHOCH
     const swings = findLastSwings(p.candles, i, p.fractalLeftRight);
     if (!swings) {
       equityCurve.push({ t: bar.time, equity });
@@ -193,7 +169,6 @@ export async function runBacktestSingleTF(params, cb = {}) {
       continue;
     }
 
-    // 9) SL/TP & tamaño
     const entry = bar.close;
     const sl = biasLong
       ? Math.min(lastSwingLow, fvg.low)
@@ -202,7 +177,6 @@ export async function runBacktestSingleTF(params, cb = {}) {
       equityCurve.push({ t: bar.time, equity });
       continue;
     }
-
     const slPoints = Math.abs(entry - sl) / p.point;
     if (slPoints < 5) {
       equityCurve.push({ t: bar.time, equity });
@@ -250,7 +224,6 @@ export async function runBacktestSingleTF(params, cb = {}) {
     }
   }
 
-  // 10) Liquidación final
   const lastBar = p.candles[N - 1];
   for (let k = openPositions.length - 1; k >= 0; k--) {
     const pos = openPositions[k];
@@ -278,7 +251,7 @@ export async function runBacktestSingleTF(params, cb = {}) {
   onStats(statsNow(equityCurve, trades));
 }
 
-// ==== helpers (idénticos a tu versión anterior) ====
+// helpers (idénticos a tu versión)
 function validateCandles(arr) {
   if (!Array.isArray(arr) || arr.length === 0) throw new Error("candles vacío");
   arr.sort((a, b) => a.time - b.time);
@@ -380,3 +353,4 @@ function checkExitSLTP(position, bar, point) {
   return { closed: false };
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  

@@ -1,149 +1,116 @@
 import React, { useMemo, useRef, useState } from "react";
 import ChartReplay from "./ChartReplay.jsx";
 
-/** Split una línea CSV respetando comillas */
-function splitCSVLine(line, sep) {
-  const out = [];
-  let cur = "";
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') {
-      // manejar comillas escapadas ""
-      if (inQuotes && line[i + 1] === '"') {
-        cur += '"';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (ch === sep && !inQuotes) {
-      out.push(cur);
-      cur = "";
+/* ---------------- Parser Investing robusto ---------------- */
+
+function detectSep(headerLine = "") {
+  const count = (s) => headerLine.split(s).length - 1;
+  const candidates = [
+    [",", count(",")],
+    [";", count(";")],
+    ["\t", count("\t")],
+  ];
+  candidates.sort((a, b) => b[1] - a[1]);
+  return candidates[0][0] || ",";
+}
+const normHeader = (s) =>
+  String(s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\.+$/g, ""); // 'Vol.' -> 'vol'
+
+function parseNumberInvesting(raw) {
+  if (raw == null) return NaN;
+  let v = String(raw).trim();
+  // limpia símbolos y espacios duros
+  v = v.replace(/\u00A0/g, " ").replace(/[^\d,.\- ]/g, "");
+  // ‘1,234.56’ => ‘1234.56’
+  if (v.includes(",") && v.includes(".")) v = v.replace(/,/g, "");
+  else {
+    // solo comas: ‘1234,56’ => ‘1234.56’
+    if (v.includes(",") && !v.includes(".")) {
+      v = v.replace(/\./g, "").replace(",", ".");
     } else {
-      cur += ch;
+      // múltiples separadores: asume miles
+      if ((v.match(/\./g) || []).length > 1) v = v.replace(/\./g, "");
+      if ((v.match(/,/g) || []).length > 1) v = v.replace(/,/g, "");
     }
   }
-  out.push(cur);
-  return out.map((s) => s.trim());
+  const n = Number(v);
+  return Number.isFinite(n) ? n : NaN;
 }
 
-/** Normaliza string numérico a Number detectando miles/decimales */
-function numSmart(s) {
-  if (s == null) return NaN;
-  let v = String(s).trim();
-  if (!v) return NaN;
-  v = v.replace(/%/g, "").trim(); // quitar %
-  // patrones
-  const commaThousand = /^\d{1,3}(,\d{3})+(\.\d+)?$/; // 1,234.56
-  const dotThousand = /^\d{1,3}(\.\d{3})+(,\d+)?$/; // 1.234,56
-  if (commaThousand.test(v)) {
-    v = v.replace(/,/g, ""); // elimina miles
-    return Number(v); // decimal ya es punto
-  }
-  if (dotThousand.test(v)) {
-    v = v.replace(/\./g, ""); // elimina miles
-    v = v.replace(/,/g, "."); // decimal a punto
-    return Number(v);
-  }
-  // solo coma decimal (ej: 1234,56)
-  if (v.includes(",") && !v.includes(".")) {
-    v = v.replace(/,/g, ".");
-    return Number(v);
-  }
-  // por defecto: quitar separadores de miles sueltos
-  // (a veces Investing trae 2,631.89 sin comillas bien)
-  if ((v.match(/,/g) || []).length > 0 && (v.match(/\./g) || []).length === 1) {
-    // intenta formato miles-coma + decimal punto
-    v = v.replace(/,/g, "");
-  }
-  return Number(v);
-}
+function safeParseCSVInvesting(text = "") {
+  try {
+    const lines = text
+      .replace(/\uFEFF/g, "")
+      .split(/\r?\n/)
+      .filter(Boolean);
+    if (!lines.length) return [];
 
-/**
- * Parser flexible:
- * - Investing.com: "Date","Price","Open","High","Low","Vol.","Change %"
- * - Genérico: time|date|timestamp, open, high, low, (close|price|adj close)
- * Devuelve [{time,open,high,low,close}] ordenado por time (ms)
- */
-function parseCSV(text) {
-  const rawLines = text.split(/\r?\n/);
-  const lines = rawLines.map((l) => l.trim()).filter(Boolean);
-  if (!lines.length) return [];
+    const sep = detectSep(lines[0]);
+    const header = lines[0].split(sep).map(normHeader);
 
-  // Detectar separador principal (si la cabecera tiene ';' y no ',')
-  const sep = lines[0].includes(";") && !lines[0].includes(",") ? ";" : ",";
+    const idx = {
+      date: header.findIndex((h) =>
+        ["date", "fecha", "time", "timestamp"].includes(h)
+      ),
+      price: header.findIndex((h) =>
+        ["price", "precio", "close", "adj close", "adjclose"].includes(h)
+      ),
+      open: header.findIndex((h) => ["open", "apertura"].includes(h)),
+      high: header.findIndex((h) => ["high", "maximo", "máximo"].includes(h)),
+      low: header.findIndex((h) => ["low", "minimo", "mínimo"].includes(h)),
+    };
 
-  const header = splitCSVLine(lines[0], sep).map((h) => h.trim().toLowerCase());
+    // si falta algo esencial, devuelve [] (no rompe la app)
+    if (Object.values(idx).some((i) => i < 0)) return [];
 
-  const timeKeys = ["time", "date", "timestamp"];
-  const openKeys = ["open", "apertura"];
-  const highKeys = ["high", "max", "alto"];
-  const lowKeys = ["low", "min", "bajo"];
-  const closeKeys = ["close", "price", "adj close", "cierre"];
+    const out = [];
+    for (let i = 1; i < lines.length; i++) {
+      const parts = lines[i].split(sep).map((p) => p.trim());
+      if (parts.length < header.length) continue;
 
-  const findIdx = (keys) => {
-    for (const k of keys) {
-      const i = header.indexOf(k);
-      if (i >= 0) return i;
+      const t = Date.parse(parts[idx.date]);
+      const o = parseNumberInvesting(parts[idx.open]);
+      const h = parseNumberInvesting(parts[idx.high]);
+      const l = parseNumberInvesting(parts[idx.low]);
+      const c = parseNumberInvesting(parts[idx.price]);
+
+      if (
+        !Number.isFinite(t) ||
+        !Number.isFinite(o) ||
+        !Number.isFinite(h) ||
+        !Number.isFinite(l) ||
+        !Number.isFinite(c)
+      )
+        continue;
+
+      out.push({ time: t, open: o, high: h, low: l, close: c });
     }
-    return -1;
-  };
-
-  let iTime = findIdx(timeKeys);
-  let iOpen = findIdx(openKeys);
-  let iHigh = findIdx(highKeys);
-  let iLow = findIdx(lowKeys);
-  let iClose = findIdx(closeKeys);
-
-  // Fallback típico Investing (Date / Price)
-  if (iTime < 0 && header.includes("date")) iTime = header.indexOf("date");
-  if (iClose < 0 && header.includes("price")) iClose = header.indexOf("price");
-
-  if ([iTime, iOpen, iHigh, iLow, iClose].some((v) => v < 0)) {
-    throw new Error(
-      "CSV debe tener columnas de tiempo y OHLC. Faltan: time, open, high, low, close. " +
-        "Aceptado: time|date|timestamp y open, high, low, (close|price|adj close)"
-    );
+    out.sort((a, b) => a.time - b.time);
+    return out;
+  } catch (e) {
+    console.error("CSV parse error:", e);
+    return [];
   }
-
-  const rows = [];
-  for (let r = 1; r < lines.length; r++) {
-    const parts = splitCSVLine(lines[r], sep);
-    if (parts.length < header.length) continue;
-
-    let tRaw = parts[iTime];
-    // ayuda a Safari con 'YYYY-MM-DD'
-    if (/^\d{4}-\d{2}-\d{2}/.test(tRaw)) tRaw = tRaw.replace(/-/g, "/");
-
-    let t = Number(tRaw);
-    if (!Number.isFinite(t)) t = Date.parse(tRaw);
-    if (!Number.isFinite(t)) continue;
-
-    const o = numSmart(parts[iOpen]);
-    const h = numSmart(parts[iHigh]);
-    const l = numSmart(parts[iLow]);
-    const c = numSmart(parts[iClose]);
-    if ([o, h, l, c].some((x) => !Number.isFinite(x))) continue;
-
-    rows.push({ time: t, open: o, high: h, low: l, close: c });
-  }
-
-  rows.sort((a, b) => a.time - b.time);
-  return rows;
 }
 
-function emaArr(period, candles) {
+/* ---------------- EMA para overlay ---------------- */
+function emaArr(period, arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return [];
   const k = 2 / (period + 1);
   const out = [];
-  let prev;
-  candles.forEach((c, i) => {
-    if (i === 0) prev = c.close;
-    else prev = c.close * k + prev * (1 - k);
-    out.push({ time: c.time, value: prev });
-  });
+  let prev = arr[0].close;
+  for (let i = 0; i < arr.length; i++) {
+    const v = i === 0 ? prev : arr[i].close * k + prev * (1 - k);
+    out.push({ time: arr[i].time, value: v });
+    prev = v;
+  }
   return out;
 }
 
+/* ---------------- UI ---------------- */
 export default function CSVTester() {
   const [rows, setRows] = useState([]);
   const [ema21, setEma21] = useState([]);
@@ -154,28 +121,40 @@ export default function CSVTester() {
   const [log, setLog] = useState("");
 
   const fileRef = useRef(null);
-
   const [form, setForm] = useState({
     symbol: "XAU/USD",
     timeframe: "D1",
     RR: 2.5,
     riskPercent: 1,
     maxTradesPerDay: 3,
-    maxOpenPositions: 1, // límite simultáneo
+    maxOpenPositions: 1,
   });
 
   const handleFile = async (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    const txt = await f.text();
-    const arr = parseCSV(txt);
-    setRows(arr);
-    setEma21(emaArr(21, arr));
-    setFvgZones([]);
-    setTrades([]);
-    setEquity([]);
-    setStats(null);
-    setLog(`Cargadas ${arr.length} velas`);
+    try {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      const txt = await f.text();
+      const arr = safeParseCSVInvesting(txt);
+      if (!arr.length) {
+        alert(
+          "No pude leer el CSV. Encabezados esperados: Date, Price, Open, High, Low (Vol. y Change% son opcionales)."
+        );
+        setRows([]);
+        setEma21([]);
+        return;
+      }
+      setRows(arr);
+      setEma21(emaArr(21, arr));
+      setFvgZones([]);
+      setTrades([]);
+      setEquity([]);
+      setStats(null);
+      setLog(`✅ Cargadas ${arr.length} velas correctamente`);
+    } catch (err) {
+      console.error(err);
+      alert("Hubo un problema leyendo el archivo.");
+    }
   };
 
   const start = async () => {
@@ -189,66 +168,69 @@ export default function CSVTester() {
     setStats(null);
     setLog("");
 
-    const resp = await fetch("http://localhost:5501/backtest/stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        symbol: form.symbol,
-        timeframe: form.timeframe,
-        RR: Number(form.RR),
-        riskPercent: Number(form.riskPercent),
-        maxTradesPerDay: Number(form.maxTradesPerDay),
-        maxOpenPositions: Number(form.maxOpenPositions),
-        candles: rows,
-      }),
-    });
-    if (!resp.body) {
-      alert("No SSE body");
-      return;
-    }
+    try {
+      const resp = await fetch("http://localhost:5501/backtest/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: form.symbol,
+          timeframe: form.timeframe,
+          RR: Number(form.RR),
+          riskPercent: Number(form.riskPercent),
+          maxTradesPerDay: Number(form.maxTradesPerDay),
+          maxOpenPositions: Number(form.maxOpenPositions),
+          candles: rows,
+        }),
+      });
 
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    const pump = async () => {
-      const { value, done } = await reader.read();
-      if (done) return;
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split("\n\n");
-      buffer = parts.pop() || "";
-
-      for (const chunk of parts) {
-        const line = chunk.split("\n").find((l) => l.startsWith("data: "));
-        if (!line) continue;
-        try {
-          const evt = JSON.parse(line.slice(6));
-          switch (evt.type) {
-            case "log":
-              setLog((s) => s + evt.payload + "\n");
-              break;
-            case "fvg":
-              setFvgZones((z) => [...z, evt.payload]);
-              break;
-            case "trade":
-              setTrades((t) => [...t, evt.payload]);
-              break;
-            case "equity":
-              setEquity((e) => [...e, evt.payload]);
-              break;
-            case "stats":
-              setStats(evt.payload);
-              break;
-            default:
-              break;
-          }
-        } catch {
-          /* ignore */
-        }
+      if (!resp.body) {
+        alert("No SSE body");
+        return;
       }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      const pump = async () => {
+        const { value, done } = await reader.read();
+        if (done) return;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() || "";
+        for (const chunk of parts) {
+          const line = chunk.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            switch (evt.type) {
+              case "log":
+                setLog((s) => s + evt.payload + "\n");
+                break;
+              case "fvg":
+                setFvgZones((z) => [...z, evt.payload]);
+                break;
+              case "trade":
+                setTrades((t) => [...t, evt.payload]);
+                break;
+              case "equity":
+                setEquity((e) => [...e, evt.payload]);
+                break;
+              case "stats":
+                setStats(evt.payload);
+                break;
+              default:
+                break;
+            }
+          } catch {}
+        }
+        pump();
+      };
       pump();
-    };
-    pump();
+    } catch (err) {
+      console.error(err);
+      alert("No pude conectar con el backend en :5501/backtest/stream");
+    }
   };
 
   const reset = () => {
@@ -257,6 +239,9 @@ export default function CSVTester() {
     setEquity([]);
     setStats(null);
     setLog("");
+    setRows([]);
+    setEma21([]);
+    if (fileRef.current) fileRef.current.value = "";
   };
 
   const metrics = useMemo(() => {
@@ -269,15 +254,10 @@ export default function CSVTester() {
 
   return (
     <div className="card">
-      <h2 style={{ marginTop: 0 }}>Forex Backtester (Single TF CSV)</h2>
-
-      <div
-        className="row"
-        style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}
-      >
+      <div className="row" style={{ alignItems: "center", gap: 10 }}>
         <input type="file" accept=".csv" ref={fileRef} onChange={handleFile} />
         <label>
-          RR
+          RR{" "}
           <input
             type="number"
             step="0.1"
@@ -287,7 +267,7 @@ export default function CSVTester() {
           />
         </label>
         <label>
-          Riesgo %
+          Riesgo %{" "}
           <input
             type="number"
             step="0.1"
@@ -299,7 +279,7 @@ export default function CSVTester() {
           />
         </label>
         <label>
-          Max/day
+          Max/day{" "}
           <input
             type="number"
             step="1"
@@ -311,7 +291,7 @@ export default function CSVTester() {
           />
         </label>
         <label>
-          Max abiertas
+          Max abiertas{" "}
           <input
             type="number"
             step="1"
@@ -320,7 +300,7 @@ export default function CSVTester() {
             onChange={(e) =>
               setForm((f) => ({ ...f, maxOpenPositions: e.target.value }))
             }
-            style={{ width: 110 }}
+            style={{ width: 90 }}
           />
         </label>
         <button onClick={start}>Iniciar Backtest</button>
@@ -361,9 +341,7 @@ export default function CSVTester() {
 
       <div className="card">
         <div style={{ fontWeight: 600, marginBottom: 6 }}>Logs</div>
-        <div className="log" style={{ whiteSpace: "pre-wrap" }}>
-          {log}
-        </div>
+        <div className="log">{log}</div>
       </div>
     </div>
   );

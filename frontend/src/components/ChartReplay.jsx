@@ -1,222 +1,346 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createChart, CrosshairMode } from "lightweight-charts";
 
+/**
+ * Props:
+ *  - candles: [{ time: <unix seconds>, open, high, low, close }]
+ *  - ema:     [{ time, value }]  (opcional)
+ *  - trades:  [{
+ *      id,
+ *      side: 'long'|'short',
+ *      entryTime, closeTime,       // unix seconds
+ *      entryPrice, takeProfit, stopLoss,
+ *      result: 'tp'|'sl'|'open'    // 'open' si sigue abierta
+ *    }]
+ *  - height?: number
+ */
 export default function ChartReplay({
   candles = [],
   ema = [],
-  fvgZones = [],
   trades = [],
+  height = 520,
 }) {
   const containerRef = useRef(null);
-  const chartRef = useRef(null);
-  const mainRef = useRef(null);
-  const emaRef = useRef(null);
+  const overlayRef = useRef(null);
 
   const [idx, setIdx] = useState(0);
   const [playing, setPlaying] = useState(false);
-  const [speed, setSpeed] = useState(50);
+  const [speed, setSpeed] = useState(1); // 0.25, 0.5, 1, 2, 4
+  const timerRef = useRef(null);
 
-  // init chart
+  // --- Chart + series ---
+  const chartRef = useRef(null);
+  const seriesRef = useRef(null);
+  const emaRef = useRef(null);
+
+  // --- helpers velocidad ---
+  const nextDelay = useMemo(() => {
+    const base = 220; // ms
+    const factor = { 0.25: 4, 0.5: 2, 1: 1, 2: 0.5, 4: 0.25 }[speed] ?? 1;
+    return Math.max(20, base * factor);
+  }, [speed]);
+
+  // Tiempo actual según idx
+  const currentTime = useMemo(
+    () =>
+      candles[idx] ? candles[idx].time : candles[candles.length - 1]?.time,
+    [candles, idx]
+  );
+
+  // Inicialización del chart
   useEffect(() => {
-    const host = containerRef.current;
-    if (!host) return;
+    if (!containerRef.current) return;
+    if (chartRef.current) return;
 
-    const chart = createChart(host, {
-      layout: { background: { color: "#0f172a" }, textColor: "#cbd5e1" },
+    const chart = createChart(containerRef.current, {
+      height,
+      layout: { background: { color: "transparent" }, textColor: "#C8D0E0" },
       grid: {
-        vertLines: { color: "#1e293b" },
-        horzLines: { color: "#1e293b" },
+        vertLines: { color: "rgba(197, 203, 206, 0.08)" },
+        horzLines: { color: "rgba(197, 203, 206, 0.08)" },
       },
-      rightPriceScale: { borderColor: "#334155" },
-      timeScale: { borderColor: "#334155", rightOffset: 6 },
-      crosshair: { mode: CrosshairMode.Normal },
+      crosshair: { mode: CrosshairMode.Magnet },
+      rightPriceScale: { borderColor: "rgba(197,203,206,0.2)" },
+      timeScale: {
+        borderColor: "rgba(197,203,206,0.2)",
+        secondsVisible: true,
+        timeVisible: true,
+      },
+      handleScroll: true,
+      handleScale: true,
     });
 
-    const main = chart.addCandlestickSeries();
-    const emaS = chart.addLineSeries({ color: "#facc15", lineWidth: 2 });
+    const candleSeries = chart.addCandlestickSeries({
+      upColor: "#26a69a",
+      downColor: "#ef5350",
+      borderVisible: false,
+      wickUpColor: "#26a69a",
+      wickDownColor: "#ef5350",
+    });
+
+    const emaSeries = chart.addLineSeries({
+      lineWidth: 2,
+      lastValueVisible: false,
+      priceLineVisible: false,
+    });
 
     chartRef.current = chart;
-    mainRef.current = main;
-    emaRef.current = emaS;
-
-    const ro = new ResizeObserver(() => {
-      const r = host.getBoundingClientRect();
-      chart.applyOptions({ width: r.width, height: Math.max(360, r.height) });
-    });
-    ro.observe(host);
-    const r0 = host.getBoundingClientRect();
-    chart.applyOptions({ width: r0.width, height: Math.max(360, r0.height) });
-
-    return () => {
-      ro.disconnect();
-      chart.remove();
-      chartRef.current = null;
-      mainRef.current = null;
-      emaRef.current = null;
-    };
-  }, []);
-
-  // feed series
-  useEffect(() => {
-    if (!mainRef.current || candles.length === 0) return;
-    mainRef.current.setData(
-      candles.map((c) => ({
-        time: Math.floor(c.time / 1000),
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      }))
-    );
-    if (emaRef.current) {
-      emaRef.current.setData(
-        (ema || []).map((e) => ({
-          time: Math.floor(e.time / 1000),
-          value: e.value,
-        }))
-      );
-    }
-    setIdx(Math.max(0, candles.length - 1));
-  }, [candles, ema]);
-
-  // overlay canvas
-  useEffect(() => {
-    if (!chartRef.current || !mainRef.current || !containerRef.current) return;
-
-    const host = containerRef.current;
-    const chart = chartRef.current;
-    const series = mainRef.current;
-
-    const overlay = document.createElement("canvas");
-    overlay.style.position = "absolute";
-    overlay.style.left = "0";
-    overlay.style.top = "0";
-    overlay.style.pointerEvents = "none";
-    overlay.style.zIndex = "5";
-    host.appendChild(overlay);
-
-    const ctx = overlay.getContext("2d");
-    const dpr = window.devicePixelRatio || 1;
-    const ts = chart.timeScale();
+    seriesRef.current = candleSeries;
+    emaRef.current = emaSeries;
 
     const resize = () => {
-      const { width, height } = host.getBoundingClientRect();
-      overlay.width = Math.max(1, Math.floor(width * dpr));
-      overlay.height = Math.max(1, Math.floor(height * dpr));
-      overlay.style.width = width + "px";
-      overlay.style.height = height + "px";
-      draw();
+      if (!containerRef.current) return;
+      const { clientWidth } = containerRef.current;
+      chart.applyOptions({ width: clientWidth, height });
+      drawTradeOverlays(); // re-posicionar overlays
     };
-
-    const draw = () => {
-      if (!candles.length) return;
-      ctx.clearRect(0, 0, overlay.width, overlay.height);
-      ctx.save();
-      ctx.scale(dpr, dpr);
-
-      const tLimit = candles[idx]?.time ?? 0;
-
-      // FVG
-      (fvgZones || []).forEach((z) => {
-        if (!z?.indexTime || z.indexTime > tLimit) return;
-        const x0 = ts.timeToCoordinate(Math.floor(z.indexTime / 1000));
-        const yH = series.priceToCoordinate(z.high);
-        const yL = series.priceToCoordinate(z.low);
-        if (x0 == null || yH == null || yL == null) return;
-
-        const x1 = overlay.width / dpr;
-        const top = Math.min(yH, yL);
-        const h = Math.abs(yH - yL);
-
-        ctx.fillStyle = "rgba(59,130,246,0.12)";
-        ctx.strokeStyle = "rgba(59,130,246,0.25)";
-        ctx.fillRect(x0, top, x1 - x0, h);
-        ctx.strokeRect(x0, top, x1 - x0, h);
-      });
-
-      // Trades (3 velas de ancho)
-      (trades || []).forEach((tr) => {
-        if (!tr?.time || tr.time > tLimit) return;
-        const i = candles.findIndex((c) => c.time === tr.time);
-        if (i < 0) return;
-
-        const c0 = candles[i];
-        const c3 = candles[Math.min(candles.length - 1, i + 3)];
-        const x0 = ts.timeToCoordinate(Math.floor(c0.time / 1000));
-        const x3 = ts.timeToCoordinate(Math.floor(c3.time / 1000));
-        const ySL = series.priceToCoordinate(tr.sl);
-        const yTP = series.priceToCoordinate(tr.tp);
-        if (x0 == null || x3 == null || ySL == null || yTP == null) return;
-
-        const left = Math.min(x0, x3);
-        const width = Math.abs(x3 - x0);
-        const top = Math.min(ySL, yTP);
-        const height = Math.abs(ySL - yTP);
-
-        const win =
-          (typeof tr.pnl === "number" && tr.pnl > 0) ||
-          (tr.exit != null && tr.tp != null && tr.exit === tr.tp);
-
-        ctx.fillStyle = win ? "rgba(34,197,94,0.22)" : "rgba(239,68,68,0.22)";
-        ctx.strokeStyle = win ? "rgba(34,197,94,0.6)" : "rgba(239,68,68,0.6)";
-        ctx.fillRect(left, top, width, height);
-        ctx.strokeRect(left, top, width, height);
-      });
-
-      ctx.restore();
-    };
-
-    const onRange = () => draw();
-    const onSize = () => resize();
-
-    ts.subscribeVisibleTimeRangeChange(onRange);
-    ts.subscribeVisibleLogicalRangeChange(onRange);
-    const ro = new ResizeObserver(onSize);
-    ro.observe(host);
-
     resize();
-    const tick = setInterval(draw, 100);
+    const obs = new ResizeObserver(resize);
+    obs.observe(containerRef.current);
+
+    // Redibujar overlays cuando cambia el rango visible
+    chart.timeScale().subscribeVisibleTimeRangeChange(drawTradeOverlays);
 
     return () => {
-      clearInterval(tick);
-      ro.disconnect();
-      ts.unsubscribeVisibleTimeRangeChange(onRange);
-      ts.unsubscribeVisibleLogicalRangeChange(onRange);
-      overlay.remove();
+      obs.disconnect();
+      chart.remove();
+      chartRef.current = null;
+      seriesRef.current = null;
+      emaRef.current = null;
     };
-  }, [candles, fvgZones, trades, idx]);
+  }, [height]);
 
-  // playback
+  // Set data inicial y por idx
   useEffect(() => {
-    if (!playing || candles.length === 0) return;
-    const h = setInterval(
-      () => setIdx((i) => Math.min(candles.length - 1, i + 1)),
-      Math.max(5, speed)
-    );
-    return () => clearInterval(h);
-  }, [playing, speed, candles.length]);
+    if (!seriesRef.current || candles.length === 0) return;
+
+    // Cargamos de 0..idx
+    seriesRef.current.setData(candles.slice(0, idx + 1));
+
+    // EMA hasta idx
+    if (emaRef.current) {
+      const emaData = ema.filter((p) => p.time <= currentTime);
+      emaRef.current.setData(emaData);
+    }
+
+    // Marcadores de entrada/salida hasta idx
+    const markers = buildMarkersUntil(currentTime, trades);
+    seriesRef.current.setMarkers(markers);
+
+    // Ajustamos rango visible suave en el primer set
+    if (idx < 3) {
+      chartRef.current?.timeScale().fitContent();
+    }
+
+    // Dibuja overlays (rectángulos de trades)
+    drawTradeOverlays();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candles, ema, idx, trades]);
+
+  // Auto-replay
+  useEffect(() => {
+    if (!playing) {
+      clearTimer();
+      return;
+    }
+    if (idx >= candles.length - 1) {
+      setPlaying(false);
+      return;
+    }
+    timerRef.current = setTimeout(() => {
+      setIdx((i) => Math.min(i + 1, candles.length - 1));
+    }, nextDelay);
+    return clearTimer;
+  }, [playing, idx, candles.length, nextDelay]);
+
+  function clearTimer() {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = null;
+  }
+
+  // --- Controles ---
+  const playPause = () => setPlaying((p) => !p);
+  const step = (delta) => {
+    setPlaying(false);
+    setIdx((i) => clamp(i + delta, 0, candles.length - 1));
+  };
+  const scrub = (e) => {
+    setPlaying(false);
+    setIdx(Number(e.target.value));
+  };
+  const slower = () =>
+    setSpeed((s) => ({ 4: 2, 2: 1, 1: 0.5, 0.5: 0.25, 0.25: 0.25 }[s]));
+  const faster = () =>
+    setSpeed((s) => ({ 0.25: 0.5, 0.5: 1, 1: 2, 2: 4, 4: 4 }[s]));
+
+  function clamp(n, a, b) {
+    return Math.max(a, Math.min(n, b));
+  }
+
+  // --- Markers de trades (flecha up/down en la vela de entrada; ✖ en salida) ---
+  function buildMarkersUntil(tUntil, trs) {
+    const list = [];
+    for (const tr of trs) {
+      if (!tr.entryTime || tr.entryTime > tUntil) continue;
+      list.push({
+        time: tr.entryTime,
+        position: tr.side === "short" ? "aboveBar" : "belowBar",
+        color: tr.side === "short" ? "#ef5350" : "#26a69a",
+        shape: tr.side === "short" ? "arrowDown" : "arrowUp",
+        text: `${tr.side === "short" ? "SHORT" : "LONG"} @ ${fmt(
+          tr.entryPrice
+        )}`,
+      });
+      if (tr.closeTime && tr.closeTime <= tUntil) {
+        list.push({
+          time: tr.closeTime,
+          position: "inBar",
+          color: tr.result === "tp" ? "#26a69a" : "#ef5350",
+          shape: "cross",
+          text: `${tr.result?.toUpperCase() || "EXIT"} @ ${fmt(
+            tr.result === "tp" ? tr.takeProfit : tr.stopLoss
+          )}`,
+        });
+      }
+    }
+    return list;
+  }
+
+  // --- Overlays rectangulares de trades (entre SL y TP; de entry→exit) ---
+  function drawTradeOverlays() {
+    const chart = chartRef.current;
+    const s = seriesRef.current;
+    if (!chart || !s || !overlayRef.current) return;
+
+    const timeScale = chart.timeScale();
+    const priceScale = chart.priceScale("right");
+    const el = overlayRef.current;
+    el.innerHTML = ""; // limpiar
+
+    const now = currentTime;
+    for (const tr of trades) {
+      if (!tr.entryTime || tr.entryTime > now) continue;
+
+      const x1 = timeScale.timeToCoordinate(tr.entryTime);
+      const x2 = timeScale.timeToCoordinate(
+        tr.closeTime && tr.closeTime <= now ? tr.closeTime : now
+      );
+      if (x1 == null || x2 == null) continue;
+
+      const yTP = priceScale.priceToCoordinate(tr.takeProfit);
+      const ySL = priceScale.priceToCoordinate(tr.stopLoss);
+      const yEntry = priceScale.priceToCoordinate(tr.entryPrice);
+      if (yTP == null || ySL == null || yEntry == null) continue;
+
+      const left = Math.min(x1, x2);
+      const width = Math.max(1, Math.abs(x2 - x1));
+      const top = Math.min(yTP, ySL);
+      const height = Math.max(1, Math.abs(yTP - ySL));
+
+      // color según resultado conocido (o side si sigue abierta)
+      const isWin = tr.result === "tp" || (!tr.result && tr.side === "long"); // heurística
+      const color = tr.result
+        ? tr.result === "tp"
+          ? "rgba(38,166,154,0.18)"
+          : "rgba(239,83,80,0.18)"
+        : "rgba(255,193,7,0.12)";
+
+      const borderColor = tr.result
+        ? tr.result === "tp"
+          ? "#26a69a"
+          : "#ef5350"
+        : "#ffc107";
+
+      // rectángulo SL↔TP
+      const box = document.createElement("div");
+      box.style.position = "absolute";
+      box.style.left = `${left}px`;
+      box.style.top = `${top}px`;
+      box.style.width = `${width}px`;
+      box.style.height = `${height}px`;
+      box.style.background = color;
+      box.style.borderTop = `2px solid ${borderColor}`; // borde = TP
+      box.style.borderBottom = `2px solid ${borderColor}`; // borde = SL
+      box.style.pointerEvents = "none";
+      el.appendChild(box);
+
+      // punto de entrada
+      const dot = document.createElement("div");
+      dot.style.position = "absolute";
+      dot.style.left = `${x1 - 3}px`;
+      dot.style.top = `${yEntry - 3}px`;
+      dot.style.width = "6px";
+      dot.style.height = "6px";
+      dot.style.borderRadius = "50%";
+      dot.style.background = tr.side === "short" ? "#ef5350" : "#26a69a";
+      dot.style.boxShadow = "0 0 8px rgba(0,0,0,0.6)";
+      dot.style.pointerEvents = "none";
+      el.appendChild(dot);
+    }
+  }
+
+  // --- UI ---
+  const total = candles.length ? candles.length - 1 : 0;
+  const speedLabel = `${speed}x`;
 
   return (
-    <div className="card">
-      <div className="row" style={{ gap: 8, marginBottom: 8 }}>
-        <button onClick={() => setPlaying((p) => !p)}>
-          {playing ? "Pausa" : "Reproducir"}
-        </button>
-        <button onClick={() => setSpeed((s) => Math.min(500, s + 25))}>
-          - velocidad
-        </button>
-        <button onClick={() => setSpeed((s) => Math.max(5, s - 25))}>
-          + velocidad
-        </button>
-        <button onClick={() => setIdx(0)}>Reset</button>
-        <div>
-          idx: {idx} / {Math.max(0, candles.length - 1)}
-        </div>
+    <div style={{ position: "relative" }}>
+      {/* Controles */}
+      <div
+        style={{
+          display: "flex",
+          gap: 8,
+          alignItems: "center",
+          marginBottom: 8,
+        }}
+      >
+        <button onClick={() => step(-10)}>«</button>
+        <button onClick={() => step(-1)}>‹</button>
+        <button onClick={playPause}>{playing ? "Pausa" : "Play"}</button>
+        <button onClick={() => step(+1)}>›</button>
+        <button onClick={() => step(+10)}>»</button>
+        <button onClick={slower}>- velocidad</button>
+        <span style={{ minWidth: 40, textAlign: "center" }}>{speedLabel}</span>
+        <button onClick={faster}>+ velocidad</button>
+        <span style={{ opacity: 0.7 }}>
+          idx: {idx} / {total}
+        </span>
+        <input
+          type="range"
+          min={0}
+          max={total}
+          value={idx}
+          onChange={scrub}
+          style={{ flex: 1 }}
+        />
       </div>
+
+      {/* Chart */}
       <div
         ref={containerRef}
-        style={{ position: "relative", width: "100%", height: 520 }}
+        style={{
+          position: "relative",
+          width: "100%",
+          height,
+          borderRadius: 12,
+          overflow: "hidden",
+        }}
+      />
+      {/* capa de overlays */}
+      <div
+        ref={overlayRef}
+        style={{
+          position: "absolute",
+          inset: 0,
+          pointerEvents: "none",
+        }}
       />
     </div>
   );
+}
+
+/* --- util --- */
+function fmt(n) {
+  const v = Number(n);
+  return Number.isFinite(v) ? v.toFixed(2) : String(n ?? "");
 }

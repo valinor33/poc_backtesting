@@ -1,45 +1,102 @@
 import React, { useMemo, useRef, useState } from "react";
 import ChartReplay from "./ChartReplay.jsx";
 
-/* ---------------- Parser Investing robusto ---------------- */
-
-function detectSep(headerLine = "") {
-  const count = (s) => headerLine.split(s).length - 1;
-  const candidates = [
-    [",", count(",")],
-    [";", count(";")],
-    ["\t", count("\t")],
-  ];
-  candidates.sort((a, b) => b[1] - a[1]);
-  return candidates[0][0] || ",";
-}
-const normHeader = (s) =>
-  String(s || "")
+/* ---------------- Helpers robustos ---------------- */
+// --- helpers ---
+function normHeader(s) {
+  return String(s || "")
     .trim()
     .toLowerCase()
-    .replace(/\.+$/g, ""); // 'Vol.' -> 'vol'
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/\s+/g, " ")
+    .replace(/[.*]+$/g, "")
+    .trim();
+}
+
+function detectSepQuoted(line = "") {
+  const candidates = [",", ";", "\t"];
+  let best = { sep: ",", count: 0 };
+  for (const sep of candidates) {
+    let inQ = false,
+      count = 0;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQ && line[i + 1] === '"') i++;
+        else inQ = !inQ;
+      } else if (!inQ && ch === sep) count++;
+    }
+    if (count > best.count) best = { sep, count };
+  }
+  return best.sep;
+}
+
+function splitCSVQuoted(line = "", sep = ",") {
+  const out = [];
+  let cur = "",
+    inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQ && line[i + 1] === '"') {
+        cur += '"';
+        i++;
+      } else inQ = !inQ;
+    } else if (ch === sep && !inQ) {
+      out.push(cur.trim());
+      cur = "";
+    } else cur += ch;
+  }
+  out.push(cur.trim());
+  return out;
+}
 
 function parseNumberInvesting(raw) {
   if (raw == null) return NaN;
   let v = String(raw).trim();
-  // limpia símbolos y espacios duros
   v = v.replace(/\u00A0/g, " ").replace(/[^\d,.\- ]/g, "");
-  // ‘1,234.56’ => ‘1234.56’
   if (v.includes(",") && v.includes(".")) v = v.replace(/,/g, "");
+  else if (v.includes(",") && !v.includes("."))
+    v = v.replace(/\./g, "").replace(",", ".");
   else {
-    // solo comas: ‘1234,56’ => ‘1234.56’
-    if (v.includes(",") && !v.includes(".")) {
-      v = v.replace(/\./g, "").replace(",", ".");
-    } else {
-      // múltiples separadores: asume miles
-      if ((v.match(/\./g) || []).length > 1) v = v.replace(/\./g, "");
-      if ((v.match(/,/g) || []).length > 1) v = v.replace(/,/g, "");
-    }
+    if ((v.match(/\./g) || []).length > 1) v = v.replace(/\./g, "");
+    if ((v.match(/,/g) || []).length > 1) v = v.replace(/,/g, "");
   }
   const n = Number(v);
   return Number.isFinite(n) ? n : NaN;
 }
 
+// MM/DD/YYYY o DD/MM/YYYY -> BusinessDay {year, month, day}
+// MM/DD/YYYY por defecto. Solo cambia a DD/MM si el primer número > 12.
+function parseToBusinessDay(s) {
+  const v = String(s || "").trim();
+  const m = v.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if (!m) return null;
+
+  let a = Number(m[1]); // parte 1
+  let b = Number(m[2]); // parte 2
+  let y = Number(m[3]);
+  if (y < 100) y += 2000;
+
+  let month, day;
+  if (a > 12 && b <= 12) {
+    // claro caso DD/MM
+    day = a;
+    month = b;
+  } else {
+    // por defecto MM/DD (Investing US)
+    month = a;
+    day = b;
+  }
+
+  // sanity check
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+
+  return { year: y, month, day };
+}
+
+// --- parser principal (devuelve velas 1D con BusinessDay) ---
 function safeParseCSVInvesting(text = "") {
   try {
     const lines = text
@@ -48,47 +105,63 @@ function safeParseCSVInvesting(text = "") {
       .filter(Boolean);
     if (!lines.length) return [];
 
-    const sep = detectSep(lines[0]);
-    const header = lines[0].split(sep).map(normHeader);
+    const sep = detectSepQuoted(lines[0]);
+    const header = splitCSVQuoted(lines[0], sep).map(normHeader);
 
     const idx = {
       date: header.findIndex((h) =>
         ["date", "fecha", "time", "timestamp"].includes(h)
       ),
       price: header.findIndex((h) =>
-        ["price", "precio", "close", "adj close", "adjclose"].includes(h)
+        [
+          "price",
+          "precio",
+          "close",
+          "adj close",
+          "adjclose",
+          "ultimo",
+          "ultimo precio",
+          "cierre",
+        ].includes(h)
       ),
       open: header.findIndex((h) => ["open", "apertura"].includes(h)),
-      high: header.findIndex((h) => ["high", "maximo", "máximo"].includes(h)),
-      low: header.findIndex((h) => ["low", "minimo", "mínimo"].includes(h)),
+      high: header.findIndex((h) => ["high", "maximo"].includes(h)),
+      low: header.findIndex((h) => ["low", "minimo"].includes(h)),
     };
-
-    // si falta algo esencial, devuelve [] (no rompe la app)
     if (Object.values(idx).some((i) => i < 0)) return [];
 
-    const out = [];
+    // dedupe por fecha (BusinessDay serializado)
+    const byDay = new Map();
+
     for (let i = 1; i < lines.length; i++) {
-      const parts = lines[i].split(sep).map((p) => p.trim());
+      const parts = splitCSVQuoted(lines[i], sep);
       if (parts.length < header.length) continue;
 
-      const t = Date.parse(parts[idx.date]);
+      const bd = parseToBusinessDay(parts[idx.date]);
       const o = parseNumberInvesting(parts[idx.open]);
       const h = parseNumberInvesting(parts[idx.high]);
       const l = parseNumberInvesting(parts[idx.low]);
       const c = parseNumberInvesting(parts[idx.price]);
 
-      if (
-        !Number.isFinite(t) ||
-        !Number.isFinite(o) ||
-        !Number.isFinite(h) ||
-        !Number.isFinite(l) ||
-        !Number.isFinite(c)
-      )
-        continue;
+      if (!bd || ![o, h, l, c].every(Number.isFinite)) continue;
 
-      out.push({ time: t, open: o, high: h, low: l, close: c });
+      const key = `${bd.year}-${String(bd.month).padStart(2, "0")}-${String(
+        bd.day
+      ).padStart(2, "0")}`;
+      // Si hay duplicados, nos quedamos con la última (o reemplazá la regla si preferís)
+      byDay.set(key, { time: bd, open: o, high: h, low: l, close: c });
     }
-    out.sort((a, b) => a.time - b.time);
+
+    // a array + orden ascendente
+    const out = Array.from(byDay.values()).sort((a, b) => {
+      const ka = a.time.year * 10000 + a.time.month * 100 + a.time.day;
+      const kb = b.time.year * 10000 + b.time.month * 100 + b.time.day;
+      return ka - kb;
+    });
+
+    // sanity log (opcional)
+    // console.log("velas únicas:", out.length);
+
     return out;
   } catch (e) {
     console.error("CSV parse error:", e);
@@ -96,7 +169,7 @@ function safeParseCSVInvesting(text = "") {
   }
 }
 
-/* ---------------- EMA para overlay ---------------- */
+// EMA con BusinessDay
 function emaArr(period, arr) {
   if (!Array.isArray(arr) || arr.length === 0) return [];
   const k = 2 / (period + 1);
@@ -110,7 +183,7 @@ function emaArr(period, arr) {
   return out;
 }
 
-/* ---------------- UI ---------------- */
+/* ---------------- UI principal ---------------- */
 export default function CSVTester() {
   const [rows, setRows] = useState([]);
   const [ema21, setEma21] = useState([]);
@@ -138,7 +211,7 @@ export default function CSVTester() {
       const arr = safeParseCSVInvesting(txt);
       if (!arr.length) {
         alert(
-          "No pude leer el CSV. Encabezados esperados: Date, Price, Open, High, Low (Vol. y Change% son opcionales)."
+          "❌ No pude leer el CSV.\nEncabezados esperados: Date, Price, Open, High, Low (Vol. y Change% son opcionales)."
         );
         setRows([]);
         setEma21([]);
@@ -211,7 +284,22 @@ export default function CSVTester() {
                 setFvgZones((z) => [...z, evt.payload]);
                 break;
               case "trade":
-                setTrades((t) => [...t, evt.payload]);
+                const t = evt.payload;
+                setTrades((prev) => [
+                  ...prev,
+                  {
+                    id: t.id,
+                    side: t.side, // o derive: t.pnl > 0 ? 'long' : 'short' (lo ideal es que venga)
+                    entryTime: Math.floor(t.openTime / 1000), // si te llega en ms
+                    closeTime: t.closeTime
+                      ? Math.floor(t.closeTime / 1000)
+                      : undefined,
+                    entryPrice: t.entry,
+                    takeProfit: t.tp,
+                    stopLoss: t.sl,
+                    result: t.result, // 'tp'|'sl'|'open'
+                  },
+                ]);
                 break;
               case "equity":
                 setEquity((e) => [...e, evt.payload]);

@@ -1,47 +1,49 @@
-import fetch from "node-fetch";
+// Twelve Data fetcher (fixed):
+// - Normalize symbols (EURUSD -> EUR/USD) if missing slash
+// - Clamp outputsize to [1, 5000]
+// Node 18+: usa fetch nativo
 
-const TD_BASE = "https://api.twelvedata.com/time_series";
+function normalizeSymbol(symbol) {
+  if (!symbol) throw new Error("Symbol is required");
+  if (symbol.includes("/")) return symbol.trim();
+  const s = symbol.trim().toUpperCase().replace(/\s+/g, "");
+  if (s.length === 6) return s.slice(0, 3) + "/" + s.slice(3); // EURUSD -> EUR/USD
+  if (s.endsWith("USD") && s.length > 3) return s.slice(0, -3) + "/USD";
+  return s;
+}
 
-export async function fetchCandlesTD({
-  apiKey,
-  symbol,
-  interval = "1day",
-  outputsize = 500,
-}) {
-  // límites TwelveData: outputsize 1..5000
-  const size = Math.max(1, Math.min(5000, Number(outputsize) || 500));
-  const url = new URL(TD_BASE);
-  url.searchParams.set("symbol", symbol);
-  url.searchParams.set("interval", interval);
-  url.searchParams.set("outputsize", String(size));
+export async function fetchCandlesTD(symbol, interval, outputsize, apiKey) {
+  const sym = normalizeSymbol(symbol);
+  let size = Number(outputsize || 1000);
+  if (!Number.isFinite(size) || size < 1) size = 1;
+  if (size > 5000) size = 5000;
+
+  const url = new URL("https://api.twelvedata.com/time_series");
+  url.searchParams.set("symbol", sym);
+  url.searchParams.set("interval", interval); // "1min", "15min", "1h"
+  url.searchParams.set("outputsize", String(size)); // clamp 1..5000
+  url.searchParams.set("format", "JSON");
   url.searchParams.set("apikey", apiKey);
 
-  const r = await fetch(url.toString());
-  const j = await r.json();
-
-  if (!r.ok || j.status === "error" || !j.values) {
-    const msg = j?.message || "TwelveData error";
-    throw new Error(`TwelveData: ${msg}`);
+  const resp = await fetch(url, { method: "GET" });
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error(`HTTP ${resp.status}: ${txt}`);
   }
-
-  // TD entrega reverse-chronological
-  const rows = (j.values || [])
-    .map((v) => ({
-      time: Date.parse(v.datetime),
-      open: Number(v.open),
-      high: Number(v.high),
-      low: Number(v.low),
-      close: Number(v.close),
-    }))
-    .filter(
-      (x) =>
-        Number.isFinite(x.time) &&
-        Number.isFinite(x.open) &&
-        Number.isFinite(x.high) &&
-        Number.isFinite(x.low) &&
-        Number.isFinite(x.close)
-    );
-
-  rows.sort((a, b) => a.time - b.time);
-  return rows;
+  const j = await resp.json();
+  if (j.status && j.status !== "ok") {
+    throw new Error(j.message || "Twelve Data API error");
+  }
+  if (!Array.isArray(j.values)) {
+    throw new Error("No 'values' in Twelve Data response");
+  }
+  const arr = j.values.map((v) => ({
+    time: new Date(v.datetime).getTime(),
+    open: parseFloat(v.open),
+    high: parseFloat(v.high),
+    low: parseFloat(v.low),
+    close: parseFloat(v.close),
+  }));
+  arr.sort((a, b) => a.time - b.time);
+  return arr;
 }

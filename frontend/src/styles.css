@@ -1,0 +1,322 @@
+:root {
+  --bg: #0b1020;
+  --panel: #0f162b;
+  --panel-2: #121a33;
+  --text: #e5e7eb;
+  --text-dim: #9ca3af;
+  --border: #1f2937;
+  --acc: #3b82f6;
+  --acc-2: #2563eb;
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --danger: #ef4444;
+  --chip: #1f2a49;
+  --muted: #cbd5e1;
+  --shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: radial-gradient(
+        1200px 600px at 20% -10%,
+        #0a1330 0%,
+        var(--bg) 55%
+      )
+      no-repeat,
+    linear-gradient(180deg, #091027 0%, #0b1020 100%) no-repeat;
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+    Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+h1,
+h2,
+h3 {
+  margin: 0 0 0.5rem 0;
+}
+h1 {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+}
+h3 {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.muted {
+  color: var(--text-dim);
+}
+
+/* Layout helpers --------------------------------------------------------- */
+.app-wrap {
+  padding: 16px;
+  max-width: 1280px;
+  margin: 0 auto;
+}
+
+.grid {
+  display: grid;
+  gap: 12px;
+}
+.grid2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.grid3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+@media (max-width: 980px) {
+  .grid2,
+  .grid3 {
+    grid-template-columns: 1fr;
+  }
+}
+
+.grid-cols-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.flex {
+  display: flex;
+}
+.items-center {
+  align-items: center;
+}
+.flex-wrap {
+  flex-wrap: wrap;
+}
+.gap-2 {
+  gap: 8px;
+}
+.gap-3 {
+  gap: 12px;
+}
+.gap-4 {
+  gap: 16px;
+}
+.mt-3 {
+  margin-top: 12px;
+}
+.mt-4 {
+  margin-top: 16px;
+}
+.p-2 {
+  padding: 8px;
+}
+.border {
+  border: 1px solid var(--border);
+}
+.rounded-md {
+  border-radius: 8px;
+}
+.text-xs {
+  font-size: 12px;
+}
+.text-lg {
+  font-size: 18px;
+}
+.font-bold {
+  font-weight: 700;
+}
+
+/* Cards ------------------------------------------------------------------ */
+.card {
+  background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  box-shadow: var(--shadow);
+}
+
+/* Inputs ----------------------------------------------------------------- */
+input,
+select {
+  background: #0c1530;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 10px;
+  border-radius: 10px;
+  outline: none;
+  transition: 0.15s border-color ease;
+}
+input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  vertical-align: middle;
+}
+input:focus,
+select:focus {
+  border-color: #31405e;
+}
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Buttons ---------------------------------------------------------------- */
+.btn {
+  appearance: none;
+  -webkit-appearance: none;
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+  color: white;
+  border: none;
+  border-radius: 12px;
+  padding: 8px 14px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(37, 99, 235, 0.35);
+  transition: transform 0.06s ease, filter 0.2s ease, background 0.2s ease;
+}
+.btn:hover {
+  filter: brightness(1.05);
+}
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn.outline {
+  background: transparent;
+  border: 1px solid #27427c;
+  color: #cfe1ff;
+  box-shadow: none;
+}
+.btn.outline:hover {
+  background: rgba(39, 66, 124, 0.15);
+}
+
+.btn.danger {
+  background: linear-gradient(180deg, #ef4444 0%, #dc2626 100%);
+  box-shadow: 0 6px 18px rgba(239, 68, 68, 0.35);
+}
+
+/* Chips ------------------------------------------------------------------ */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--chip);
+  color: #b7c6ff;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid #2b3860;
+}
+
+/* Progress --------------------------------------------------------------- */
+progress {
+  width: 180px;
+  height: 10px;
+  border: none;
+  border-radius: 999px;
+  background: #0f1a34;
+}
+progress::-webkit-progress-bar {
+  background: #0f1a34;
+  border-radius: 999px;
+}
+progress::-webkit-progress-value {
+  background: linear-gradient(90deg, #2563eb, #22c55e);
+  border-radius: 999px;
+}
+
+/* Log panel -------------------------------------------------------------- */
+.log {
+  max-height: 180px;
+  overflow: auto;
+  background: #0b1327;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #c7d2fe;
+}
+
+/* Table ------------------------------------------------------------------ */
+table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+}
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #121a33;
+  color: #cfe1ff;
+  text-align: left;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+}
+tbody td {
+  padding: 10px;
+  border-bottom: 1px dashed #1c2746;
+  color: var(--text);
+}
+tbody tr:hover td {
+  background: rgba(36, 112, 255, 0.06);
+}
+
+/* Range slider ----------------------------------------------------------- */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 220px;
+  height: 8px;
+  background: #0f1a34;
+  border-radius: 12px;
+  outline: none;
+  border: 1px solid #1e2b52;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #facc15 0%, #f59e0b 100%);
+  border: 1px solid #7c5b00;
+  box-shadow: 0 2px 10px rgba(250, 204, 21, 0.4);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #facc15 0%, #f59e0b 100%);
+  border: 1px solid #7c5b00;
+}
+
+/* Metric tiles (si las usas) -------------------------------------------- */
+.metric {
+  background: linear-gradient(180deg, #0d1530 0%, #0e1734 100%);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  text-align: center;
+}
+.metric b {
+  font-size: 20px;
+}
+
+/* Small helpers ---------------------------------------------------------- */
+code {
+  background: #0b1327;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid #1a2344;
+  color: #dbeafe;
+}
